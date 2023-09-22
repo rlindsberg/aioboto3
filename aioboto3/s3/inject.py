@@ -224,14 +224,20 @@ async def upload_fileobj(
         # Loop whilst no other co-routine has raised an exception
         while not exception:
             try:
+                logger.info('L227 awailting io_queue.get()')
                 part_args = await io_queue.get()
+                logger.info('L229 done io_queue.get()')
             except asyncio.CancelledError:
+                logger.info('L231 exception')
                 break
 
             # Submit part to S3
             try:
+                logger.info('L235 awailting self.upload_part')
                 resp = await self.upload_part(**part_args)
+                logger.info('L237 done self.upload_part')
             except Exception as err:
+                logger.info('L240 exception')
                 # Set the main exception variable to the current exception, trigger the exception event
                 exception = err
                 exception_event.set()
@@ -253,6 +259,7 @@ async def upload_fileobj(
                     pass
 
             # Mark task as done so .join() will work later on
+            logger.info('L262 marking this task as done')
             io_queue.task_done()
 
         # For testing return number of parts uploaded
@@ -264,20 +271,26 @@ async def upload_fileobj(
         part = 0
         eof = False
         while not eof:
+            logger.info('L274 not yet EOF')
             part += 1
             multipart_payload = bytearray()
             loop_counter = 0
             while len(multipart_payload) < multipart_chunksize:
+                logger.info('L278 is true')
                 try:
                     # Handles if .read() returns anything that can be awaited
                     data_chunk = Fileobj.read(io_chunksize)
                     if inspect.isawaitable(data_chunk):
                         # noinspection PyUnresolvedReferences
+                        logger.info('L285 awaiting data_chunk')
                         data = await data_chunk
+                        logger.info('L287 done data_chunk')
+
                     else:
                         data = data_chunk
                         await asyncio.sleep(0.0)  # Yield to the eventloop incase .read() took ages
                 except Exception as err:
+                    logger.info('L293 exception')
                     # Caught some random exception whilst reading from a file
                     exception = err
                     exception_event.set()
@@ -288,6 +301,7 @@ async def upload_fileobj(
                     break
 
                 if data == b'' and loop_counter > 0:  # End of file, handles uploading empty files
+                    logger.info('L304 EOF!')
                     eof = True
                     break
                 multipart_payload += data
@@ -303,27 +317,37 @@ async def upload_fileobj(
             if Processing:
                 multipart_payload = Processing(multipart_payload)
 
+            logger.info('L320 awaiting io_queue.put')
             await io_queue.put({'Body': multipart_payload, 'Bucket': Bucket, 'Key': Key,
                                 'PartNumber': part, 'UploadId': upload_id})
-            logger.debug('Added part to io_queue')
+            logger.info('L323 Added part to io_queue')
             expected_parts += 1
 
+    logger.info('L326')
     file_reader_future = asyncio.ensure_future(file_reader())
     futures = [asyncio.ensure_future(uploader()) for _ in range(0, max_concurrency)]
 
     # Wait for file reader to finish
+    logger.info('L331 awaiting file_reader_future')
     await file_reader_future
+    logger.info('L331 done file_reader_future')
+
     # So by this point all of the file is read and in a queue
 
     # wait for either io queue is finished, or an exception has been raised
+    logger.info('L338 await all tasks to finish')
     _, pending = await asyncio.wait(
         {asyncio.create_task(io_queue.join()), asyncio.create_task(exception_event.wait())},
         return_when=asyncio.FIRST_COMPLETED
     )
+    logger.info('L343 done asyncio tasks')
 
     if exception_event.is_set() or len(finished_parts) != expected_parts:
         # An exception during upload or for some reason the finished parts dont match the expected parts, cancel upload
+        logger.info('L347 awaiting abort_multipart_upload')
         await self.abort_multipart_upload(Bucket=Bucket, Key=Key, UploadId=upload_id)
+        logger.info('L349 done abort_multipart_upload')
+
         # Raise exception later after we've disposed of the pending co-routines
     else:
         # All io chunks from the queue have been successfully uploaded
@@ -331,29 +355,43 @@ async def upload_fileobj(
             # Sort the finished parts as they must be in order
             finished_parts.sort(key=lambda item: item['PartNumber'])
 
+            logger.info('L358 awaiting complete_multipart_upload')
             await self.complete_multipart_upload(
                 Bucket=Bucket,
                 Key=Key,
                 UploadId=upload_id,
                 MultipartUpload={'Parts': finished_parts}
             )
+            logger.info('L365 done complete_multipart_upload')
+
         except Exception as err:
+            logger.info('L368 exception')
             # We failed to complete the upload, try and abort, then return the orginal error
             exception = err
             try:
+                logger.info('L372 awaiting abort_multipart_upload')
                 await self.abort_multipart_upload(Bucket=Bucket, Key=Key, UploadId=upload_id)
+                logger.info('L374 done abort_multipart_upload')
+
             except:
+                logger.info('L377 exception')
                 pass
 
     # Close either the Queue.join() coro, or the event.wait() coro
     for coro in pending:
         if not coro.done():
+            logger.info('L383 trying to cancel coro')
             coro.cancel()
             try:
+                logger.info('L386 awaiting coro')
                 await coro
+                logger.info('L388 done coro')
+
             except:
+                logger.info('L391 exception')
                 pass
 
+    logger.info('L394!')
     # Cancel any remaining futures, though if successful they'll be done
     cancelled = []
     for future in futures:
